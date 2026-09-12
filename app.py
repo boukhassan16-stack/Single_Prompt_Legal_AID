@@ -132,8 +132,8 @@ def build_vector_store():
         for i, doc in enumerate(docs):
             # Chunk documents for retrieval.
             words = doc["text"].split()
-            chunk_size = 700
-            overlap = 100
+            chunk_size = 400
+            overlap = 50
             start = 0
             chunk_no = 0
             while start < len(words):
@@ -149,7 +149,7 @@ def build_vector_store():
 
     return collection
 
-def retrieve_context(query: str, top_k: int = 6) -> str:
+def retrieve_context(query: str, top_k: int = 3) -> str:
     collection = build_vector_store()
     if collection is None:
         return (
@@ -193,15 +193,20 @@ Facts supplied by user:
 Retrieved knowledge-base material:
 {context}
 
-Produce a structured research memo:
+Produce a concise structured research memo.
+
+Keep the response below approximately 1200 words.
+
+Include only:
 - Issue
-- Relevant legal concepts/rules supported by the sources
+- Relevant legal concepts supported by the sources
 - Important factual questions
 - Evidence/documents that matter
 - Possible forum/authority, only when supported
 - Uncertainties and province/city dependencies
 - Source names used
 
+Do not repeat the user's facts unnecessarily.
 Do not invent citations.
 """}
         ],
@@ -218,10 +223,18 @@ You are the Legal Action & Documents Agent.
 Research memo:
 {researcher}
 
-Create a practical, non-binding action plan for a Pakistani citizen:
+create a practical, non-binding action plan for a Pakistani citizen.
+
+Keep the response below approximately 800 words.
+
+Use concise bullet points.
+
+Do not repeat the research memo unnecessarily.
+
+Include:
 1. What to do first
 2. What evidence/documents to collect
-3. Where they may need to go or contact, only if supported by the memo
+3. Where they may need to go or contact, only if supported
 4. What information they should take with them
 5. What to do if the first route does not work
 6. Questions they should ask a lawyer/official
@@ -248,8 +261,9 @@ User facts:
 Research memo:
 {researcher}
 
-Prepare a simple complaint/application draft the user can review with a
-qualified lawyer or appropriate authority.
+Prepare a simple complaint/application draft.
+
+Keep the draft concise and normally below 700 words.
 
 Requirements:
 - Do not invent facts.
@@ -381,18 +395,20 @@ issue_type = st.selectbox("What kind of issue do you need help with?", list(TOPI
 user_question = st.text_area(
     "Describe your legal problem",
     height=160,
+    max_chars=5000,
     placeholder=(
-        "Example: My landlord is refusing to return my security deposit after I moved out. "
-        "I have the tenancy agreement and payment receipts."
+        "Example: My landlord is refusing to return my security deposit "
+        "after I moved out. I have the tenancy agreement and payment receipts."
     ),
 )
 
 facts = st.text_area(
     "Important facts (optional)",
     height=140,
+    max_chars=4000,
     placeholder=(
-        "Province/city, dates, notices received, amount involved, documents available, "
-        "whether a complaint/FIR has already been made, etc."
+        "Province/city, dates, notices received, amount involved, "
+        "documents available, etc."
     ),
 )
 
