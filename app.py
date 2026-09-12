@@ -34,24 +34,17 @@ st.set_page_config(
 )
 
 SYSTEM_SAFETY = """
-You are an AI legal-information assistant for people in Pakistan.
-You provide general legal information and practical guidance, not a substitute
-for a licensed Pakistani lawyer, court, police officer, FIA officer, or other
-authorized professional.
+You are an AI legal-information assistant for Pakistan.
 
-Rules:
-1. Never claim to be a lawyer or guarantee a legal outcome.
-2. Do not invent Pakistani laws, sections, procedures, offices, deadlines,
-   fees, addresses, case law, or citations.
-3. Clearly distinguish verified information from assumptions.
-4. Prefer the supplied legal knowledge-base excerpts over unsupported memory.
-5. If the user's province/city or facts are missing and they materially affect
-   the answer, say what information is needed.
-6. For urgent danger, threats, ongoing violence, arrest, or immediate risk,
-   advise contacting appropriate emergency/law-enforcement/legal-help services.
-7. For drafts, use placeholders rather than inventing facts.
-8. Avoid telling users to conceal evidence, evade law enforcement, intimidate
-   witnesses, or destroy/alter records.
+Provide general legal information, not legal advice.
+Do not claim to be a lawyer or guarantee outcomes.
+Do not invent laws, sections, procedures, deadlines, fees, offices,
+citations, or URLs.
+Prefer retrieved knowledge-base sources.
+Clearly identify uncertainty and province/city dependencies.
+Use placeholders instead of inventing facts in drafts.
+For emergencies or immediate danger, advise contacting appropriate
+emergency, law-enforcement, or qualified legal-help services.
 """
 
 TOPIC_PROMPTS = {
@@ -132,8 +125,8 @@ def build_vector_store():
         for i, doc in enumerate(docs):
             # Chunk documents for retrieval.
             words = doc["text"].split()
-            chunk_size = 400
-            overlap = 50
+            chunk_size = 300
+            overlap = 40
             start = 0
             chunk_no = 0
             while start < len(words):
@@ -149,24 +142,47 @@ def build_vector_store():
 
     return collection
 
-def retrieve_context(query: str, top_k: int = 3) -> str:
+def retrieve_context(query: str, top_k: int = 2) -> str:
     collection = build_vector_store()
+
     if collection is None:
         return (
             "NO VERIFIED KNOWLEDGE-BASE EXCERPTS WERE RETRIEVED. "
             "Do not present unsupported legal details as verified law."
         )
 
-    result = collection.query(query_texts=[query], n_results=top_k)
+    result = collection.query(
+        query_texts=[query],
+        n_results=top_k
+    )
+
     documents = result.get("documents", [[]])[0]
     metadatas = result.get("metadatas", [[]])[0]
 
     blocks = []
-    for i, doc in enumerate(documents):
-        source = metadatas[i].get("source", "Unknown source") if i < len(metadatas) else "Unknown source"
-        blocks.append(f"[Source: {source}]\n{doc}")
+    max_context_chars = 10000
+    current_chars = 0
 
-    return "\n\n".join(blocks) if blocks else "No relevant excerpts found."
+    for i, doc in enumerate(documents):
+        source = (
+            metadatas[i].get("source", "Unknown source")
+            if i < len(metadatas)
+            else "Unknown source"
+        )
+
+        block = f"[Source: {source}]\n{doc}"
+
+        remaining = max_context_chars - current_chars
+
+        if remaining <= 0:
+            break
+
+        block = block[:remaining]
+
+        blocks.append(block)
+        current_chars += len(block)
+
+    return "\n\n".join(blocks)
 
 def run_agents(issue_type: str, user_question: str, facts: str, model: str):
     client = get_client()
@@ -195,18 +211,18 @@ Retrieved knowledge-base material:
 
 Produce a concise structured research memo.
 
-Keep the response below approximately 1200 words.
+Keep the response below 600 words.
 
 Include only:
 - Issue
-- Relevant legal concepts supported by the sources
+- Relevant legal concepts supported by sources
 - Important factual questions
-- Evidence/documents that matter
-- Possible forum/authority, only when supported
-- Uncertainties and province/city dependencies
-- Source names used
+- Evidence/documents
+- Possible forum/authority when supported
+- Uncertainties
+- Source names
 
-Do not repeat the user's facts unnecessarily.
+Do not repeat the user's facts.
 Do not invent citations.
 """}
         ],
@@ -223,23 +239,22 @@ You are the Legal Action & Documents Agent.
 Research memo:
 {researcher}
 
-create a practical, non-binding action plan for a Pakistani citizen.
+Create a concise practical action plan.
 
-Keep the response below approximately 800 words.
+Keep the response below 500 words.
 
-Use concise bullet points.
-
-Do not repeat the research memo unnecessarily.
+Use bullet points.
 
 Include:
-1. What to do first
-2. What evidence/documents to collect
-3. Where they may need to go or contact, only if supported
-4. What information they should take with them
-5. What to do if the first route does not work
-6. Questions they should ask a lawyer/official
+1. First steps
+2. Evidence/documents
+3. Possible authority/forum
+4. Information to take
+5. Escalation options
+6. Questions for a lawyer/official
 
-Avoid invented addresses, phone numbers, fees, deadlines, or legal sections.
+Do not repeat the research memo.
+Do not invent legal procedures.
 """}
         ],
         model=model,
@@ -263,15 +278,18 @@ Research memo:
 
 Prepare a simple complaint/application draft.
 
-Keep the draft concise and normally below 700 words.
+Keep the draft below 500 words.
 
-Requirements:
-- Do not invent facts.
-- Use [PLACEHOLDER] for missing facts.
-- Include a clear subject, factual chronology, requested action, evidence list,
-  date and signature placeholders.
-- Do not assert legal sections unless supported by the research memo.
-- Keep the language understandable.
+Do not invent facts.
+Use [PLACEHOLDER] for missing information.
+Use simple language.
+Include:
+- Recipient
+- Subject
+- Facts
+- Requested action
+- Evidence list
+- Date/signature placeholders
 """}
         ],
         model=model,
@@ -284,26 +302,19 @@ Requirements:
             {"role": "user", "content": f"""
 You are the Legal Quality Review Agent.
 
-Review the following:
-RESEARCH:
-{researcher}
+Review the research, action guide and draft.
 
-ACTION GUIDE:
-{action_guide}
+Keep your review below 400 words.
 
-DRAFT:
-{draft}
-
-Return:
-- Key risks/errors
-- Unsupported legal claims
+Return only:
+- Unsupported claims
 - Missing facts
 - Missing evidence
-- Statements that need province/city verification
-- Safety/legal disclaimer
-- Final corrections to make before a user relies on it
+- Jurisdiction issues
+- Safety concerns
+- Corrections required
 
-Do not add new unsupported law.
+Do not reproduce the original documents.
 """}
         ],
         model=model,
@@ -316,29 +327,24 @@ Do not add new unsupported law.
             {"role": "user", "content": f"""
 You are the Senior Legal Aid Assistant.
 
-Synthesize the agents' work into a clear answer for the user.
+Synthesize the agents' work into a concise answer.
 
-RESEARCH MEMO:
-{researcher}
+Keep the final answer below 800 words.
 
-ACTION GUIDE:
-{action_guide}
-
-DRAFT:
-{draft}
-
-QUALITY REVIEW:
-{reviewer}
+Do not reproduce the research memo.
+Do not reproduce the review.
+Do not repeat large portions of the complaint.
 
 Use these headings:
+
 1. What this appears to be
 2. General legal information
 3. Recommended next steps
-4. Documents/evidence to prepare
+4. Documents/evidence
 5. Complaint/application draft
 6. Important cautions
 
-Clearly label anything that requires local/professional verification.
+Clearly identify information that requires local or professional verification.
 """}
         ],
         model=model,
