@@ -376,14 +376,6 @@ with st.sidebar:
     ],
     index=0,
 )
-    api_key = st.text_input(
-        "Groq API Key",
-        type="password",
-        value=os.getenv("GROQ_API_KEY", ""),
-        help="For local testing you can enter it here. Do not commit API keys to Git.",
-    )
-    if api_key:
-        st.session_state["groq_api_key"] = api_key
 
   
 
