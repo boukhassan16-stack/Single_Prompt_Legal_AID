@@ -1,0 +1,423 @@
+import os
+import re
+import json
+from pathlib import Path
+from typing import List, Dict
+
+import streamlit as st
+from groq import Groq
+
+# Optional RAG dependencies
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+    RAG_AVAILABLE = True
+except Exception:
+    RAG_AVAILABLE = False
+
+APP_TITLE = "PakLegal AI — Pakistani Legal Aid Assistant"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
+KNOWLEDGE_DIR = Path("knowledge")
+
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon="⚖️",
+    layout="wide",
+)
+
+SYSTEM_SAFETY = """
+You are an AI legal-information assistant for people in Pakistan.
+You provide general legal information and practical guidance, not a substitute
+for a licensed Pakistani lawyer, court, police officer, FIA officer, or other
+authorized professional.
+
+Rules:
+1. Never claim to be a lawyer or guarantee a legal outcome.
+2. Do not invent Pakistani laws, sections, procedures, offices, deadlines,
+   fees, addresses, case law, or citations.
+3. Clearly distinguish verified information from assumptions.
+4. Prefer the supplied legal knowledge-base excerpts over unsupported memory.
+5. If the user's province/city or facts are missing and they materially affect
+   the answer, say what information is needed.
+6. For urgent danger, threats, ongoing violence, arrest, or immediate risk,
+   advise contacting appropriate emergency/law-enforcement/legal-help services.
+7. For drafts, use placeholders rather than inventing facts.
+8. Avoid telling users to conceal evidence, evade law enforcement, intimidate
+   witnesses, or destroy/alter records.
+"""
+
+TOPIC_PROMPTS = {
+    "General legal issue": "Identify the legal issue, relevant Pakistani legal concepts, and safe next steps.",
+    "Tenancy dispute": "Analyze a landlord/tenant dispute. Focus on lease terms, rent records, notices, possession/eviction issues, province-specific uncertainty, evidence, and appropriate forums.",
+    "Theft / FIR": "Explain the general process around a theft complaint/FIR, evidence preservation, police complaint steps, and what to do if the FIR is not registered. Do not invent criminal-law sections unless supported by retrieved sources.",
+    "Online fraud": "Analyze an online fraud/cybercrime complaint. Focus on preserving digital evidence, transaction records, account details, reporting channels, and escalation. Do not invent agency procedures or URLs.",
+}
+
+def get_client():
+    key = os.getenv("GROQ_API_KEY") or st.session_state.get("groq_api_key")
+    if not key:
+        return None
+    return Groq(api_key=key)
+
+def groq_chat(client: Groq, messages: List[Dict], model: str = DEFAULT_MODEL, temperature: float = 0.2) -> str:
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content.strip()
+
+def load_knowledge_documents() -> List[Dict]:
+    """
+    Loads .txt/.md/.pdf files from knowledge/.
+    For production, populate this directory with authoritative Pakistani
+    legal material and attach source metadata.
+    """
+    docs = []
+    KNOWLEDGE_DIR.mkdir(exist_ok=True)
+
+    for path in KNOWLEDGE_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+
+        text = ""
+        try:
+            if path.suffix.lower() in {".txt", ".md"}:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            elif path.suffix.lower() == ".pdf":
+                from pypdf import PdfReader
+                reader = PdfReader(str(path))
+                text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception:
+            continue
+
+        if text.strip():
+            docs.append({
+                "id": str(path),
+                "source": path.name,
+                "text": text,
+            })
+    return docs
+
+@st.cache_resource(show_spinner=False)
+def build_vector_store():
+    if not RAG_AVAILABLE:
+        return None
+
+    docs = load_knowledge_documents()
+    if not docs:
+        return None
+
+    client = chromadb.PersistentClient(path=".chroma")
+    ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
+    )
+    collection = client.get_or_create_collection(
+        name="paklegal_knowledge",
+        embedding_function=ef,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    existing = collection.count()
+    if existing == 0:
+        ids, texts, metas = [], [], []
+        for i, doc in enumerate(docs):
+            # Chunk documents for retrieval.
+            words = doc["text"].split()
+            chunk_size = 700
+            overlap = 100
+            start = 0
+            chunk_no = 0
+            while start < len(words):
+                chunk = " ".join(words[start:start + chunk_size])
+                ids.append(f"{i}-{chunk_no}")
+                texts.append(chunk)
+                metas.append({"source": doc["source"], "path": doc["id"]})
+                chunk_no += 1
+                start += chunk_size - overlap
+
+        if texts:
+            collection.add(ids=ids, documents=texts, metadatas=metas)
+
+    return collection
+
+def retrieve_context(query: str, top_k: int = 6) -> str:
+    collection = build_vector_store()
+    if collection is None:
+        return (
+            "NO VERIFIED KNOWLEDGE-BASE EXCERPTS WERE RETRIEVED. "
+            "Do not present unsupported legal details as verified law."
+        )
+
+    result = collection.query(query_texts=[query], n_results=top_k)
+    documents = result.get("documents", [[]])[0]
+    metadatas = result.get("metadatas", [[]])[0]
+
+    blocks = []
+    for i, doc in enumerate(documents):
+        source = metadatas[i].get("source", "Unknown source") if i < len(metadatas) else "Unknown source"
+        blocks.append(f"[Source: {source}]\n{doc}")
+
+    return "\n\n".join(blocks) if blocks else "No relevant excerpts found."
+
+def run_agents(issue_type: str, user_question: str, facts: str, model: str):
+    client = get_client()
+    if client is None:
+        raise RuntimeError("GROQ_API_KEY is missing.")
+
+    retrieval_query = f"{issue_type}\n{user_question}\n{facts}"
+    context = retrieve_context(retrieval_query)
+
+    researcher = groq_chat(
+        client,
+        [
+            {"role": "system", "content": SYSTEM_SAFETY},
+            {"role": "user", "content": f"""
+You are the Legal Research Agent.
+Topic: {issue_type}
+
+User question:
+{user_question}
+
+Facts supplied by user:
+{facts}
+
+Retrieved knowledge-base material:
+{context}
+
+Produce a structured research memo:
+- Issue
+- Relevant legal concepts/rules supported by the sources
+- Important factual questions
+- Evidence/documents that matter
+- Possible forum/authority, only when supported
+- Uncertainties and province/city dependencies
+- Source names used
+
+Do not invent citations.
+"""}
+        ],
+        model=model,
+    )
+
+    action_guide = groq_chat(
+        client,
+        [
+            {"role": "system", "content": SYSTEM_SAFETY},
+            {"role": "user", "content": f"""
+You are the Legal Action & Documents Agent.
+
+Research memo:
+{researcher}
+
+Create a practical, non-binding action plan for a Pakistani citizen:
+1. What to do first
+2. What evidence/documents to collect
+3. Where they may need to go or contact, only if supported by the memo
+4. What information they should take with them
+5. What to do if the first route does not work
+6. Questions they should ask a lawyer/official
+
+Avoid invented addresses, phone numbers, fees, deadlines, or legal sections.
+"""}
+        ],
+        model=model,
+    )
+
+    draft = groq_chat(
+        client,
+        [
+            {"role": "system", "content": SYSTEM_SAFETY},
+            {"role": "user", "content": f"""
+You are the Legal Drafting Agent.
+
+Issue:
+{issue_type}
+
+User facts:
+{facts}
+
+Research memo:
+{researcher}
+
+Prepare a simple complaint/application draft the user can review with a
+qualified lawyer or appropriate authority.
+
+Requirements:
+- Do not invent facts.
+- Use [PLACEHOLDER] for missing facts.
+- Include a clear subject, factual chronology, requested action, evidence list,
+  date and signature placeholders.
+- Do not assert legal sections unless supported by the research memo.
+- Keep the language understandable.
+"""}
+        ],
+        model=model,
+    )
+
+    reviewer = groq_chat(
+        client,
+        [
+            {"role": "system", "content": SYSTEM_SAFETY},
+            {"role": "user", "content": f"""
+You are the Legal Quality Review Agent.
+
+Review the following:
+RESEARCH:
+{researcher}
+
+ACTION GUIDE:
+{action_guide}
+
+DRAFT:
+{draft}
+
+Return:
+- Key risks/errors
+- Unsupported legal claims
+- Missing facts
+- Missing evidence
+- Statements that need province/city verification
+- Safety/legal disclaimer
+- Final corrections to make before a user relies on it
+
+Do not add new unsupported law.
+"""}
+        ],
+        model=model,
+    )
+
+    final_answer = groq_chat(
+        client,
+        [
+            {"role": "system", "content": SYSTEM_SAFETY},
+            {"role": "user", "content": f"""
+You are the Senior Legal Aid Assistant.
+
+Synthesize the agents' work into a clear answer for the user.
+
+RESEARCH MEMO:
+{researcher}
+
+ACTION GUIDE:
+{action_guide}
+
+DRAFT:
+{draft}
+
+QUALITY REVIEW:
+{reviewer}
+
+Use these headings:
+1. What this appears to be
+2. General legal information
+3. Recommended next steps
+4. Documents/evidence to prepare
+5. Complaint/application draft
+6. Important cautions
+
+Clearly label anything that requires local/professional verification.
+"""}
+        ],
+        model=model,
+        temperature=0.1,
+    )
+
+    return {
+        "context": context,
+        "researcher": researcher,
+        "action_guide": action_guide,
+        "draft": draft,
+        "reviewer": reviewer,
+        "final": final_answer,
+    }
+
+# ---------------- UI ----------------
+
+st.title("⚖️ PakLegal AI")
+st.caption("AI-powered legal information and complaint-drafting assistant for Pakistan")
+
+with st.sidebar:
+    st.header("Settings")
+    api_key = st.text_input(
+        "Groq API Key",
+        type="password",
+        value=os.getenv("GROQ_API_KEY", ""),
+        help="For local testing you can enter it here. Do not commit API keys to Git.",
+    )
+    if api_key:
+        st.session_state["groq_api_key"] = api_key
+
+    model = st.selectbox(
+        "Groq model",
+        [DEFAULT_MODEL, "llama-3.1-8b-instant"],
+        index=0,
+    )
+
+    st.divider()
+    st.info(
+        "This prototype provides general legal information. "
+        "It is not a substitute for advice from a qualified Pakistani lawyer."
+    )
+
+if "result" not in st.session_state:
+    st.session_state.result = None
+
+issue_type = st.selectbox("What kind of issue do you need help with?", list(TOPIC_PROMPTS.keys()))
+
+user_question = st.text_area(
+    "Describe your legal problem",
+    height=160,
+    placeholder=(
+        "Example: My landlord is refusing to return my security deposit after I moved out. "
+        "I have the tenancy agreement and payment receipts."
+    ),
+)
+
+facts = st.text_area(
+    "Important facts (optional)",
+    height=140,
+    placeholder=(
+        "Province/city, dates, notices received, amount involved, documents available, "
+        "whether a complaint/FIR has already been made, etc."
+    ),
+)
+
+if st.button("🔎 Analyze my issue", type="primary", use_container_width=True):
+    if not (os.getenv("GROQ_API_KEY") or api_key):
+        st.error("Please provide your GROQ_API_KEY in the sidebar.")
+    elif not user_question.strip():
+        st.warning("Please describe your legal problem.")
+    else:
+        with st.spinner("Running legal research and review agents..."):
+            try:
+                st.session_state.result = run_agents(
+                    issue_type,
+                    user_question,
+                    facts,
+                    model,
+                )
+            except Exception as exc:
+                st.error(f"Could not complete the analysis: {exc}")
+
+result = st.session_state.result
+
+if result:
+    st.divider()
+    st.subheader("Final Legal Aid Response")
+    st.markdown(result["final"])
+
+    with st.expander("📚 Retrieved legal research context"):
+        st.text(result["context"])
+
+    with st.expander("🧑‍⚖️ Research Agent"):
+        st.markdown(result["researcher"])
+
+    with st.expander("🧭 Action & Documents Agent"):
+        st.markdown(result["action_guide"])
+
+    with st.expander("📝 Drafting Agent"):
+        st.markdown(result["draft"])
+
+    with st.expander("✅ Quality Review Agent"):
+        st.markdown(result["reviewer"])
