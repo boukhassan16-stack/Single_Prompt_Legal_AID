@@ -347,6 +347,15 @@ st.caption("AI-powered legal information and complaint-drafting assistant for Pa
 
 with st.sidebar:
     st.header("Settings")
+    model = st.selectbox(
+    "Groq model",
+    [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+    ],
+    index=0,
+)
     api_key = st.text_input(
         "Groq API Key",
         type="password",
@@ -356,15 +365,7 @@ with st.sidebar:
     if api_key:
         st.session_state["groq_api_key"] = api_key
 
-   model = st.selectbox(
-    "Groq model",
-    [
-        "openai/gpt-oss-120b",
-        "openai/gpt-oss-20b",
-        "qwen/qwen3.6-27b",
-    ],
-    index=0,
-)
+  
 
     st.divider()
     st.info(
