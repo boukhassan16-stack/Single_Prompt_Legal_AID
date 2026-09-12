@@ -16,9 +16,17 @@ except Exception:
     RAG_AVAILABLE = False
 
 APP_TITLE = "PakLegal AI — Pakistani Legal Aid Assistant"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 KNOWLEDGE_DIR = Path("knowledge")
-
+model = st.selectbox(
+    "Groq model",
+    [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+    ],
+    index=0,
+)
 st.set_page_config(
     page_title=APP_TITLE,
     page_icon="⚖️",
@@ -348,11 +356,15 @@ with st.sidebar:
     if api_key:
         st.session_state["groq_api_key"] = api_key
 
-    model = st.selectbox(
-        "Groq model",
-        [DEFAULT_MODEL, "llama-3.1-8b-instant"],
-        index=0,
-    )
+   model = st.selectbox(
+    "Groq model",
+    [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+    ],
+    index=0,
+)
 
     st.divider()
     st.info(
